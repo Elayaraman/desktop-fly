@@ -8,7 +8,8 @@
     "start": "electron .",
     "simtest": "node test/simtest.js",
     "behaviortest": "node test/behaviortest.js",
-    "test": "node test/simtest.js && node test/behaviortest.js && node test/locomotortest.js",
+    "test": "node test/simtest.js && node test/behaviortest.js && node test/locomotortest.js && node test/pettest.js",
+    "pettest": "node test/pettest.js",
     "locomotortest": "node test/locomotortest.js"
   },
   "license": "MIT",

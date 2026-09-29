@@ -4,6 +4,11 @@
 
 <h1 align="center">DesktopFly 🪰</h1>
 
+This branch adds **cursor following and sugar feeding**, plus a self-contained
+macOS app bundle and lower-overhead rendering defaults. These pet behaviors are
+explicit app rules alongside the neural simulation. See [setup and controls](LOCAL-SETUP.md).
+Build the app with `./package-app.sh`, then open `dist/DesktopFly.app`.
+
 <p align="center">
 A 3D fruit fly that lives on your macOS desktop, with spiking simulations
 built from <a href="https://codex.flywire.ai">FlyWire</a> brain wiring and

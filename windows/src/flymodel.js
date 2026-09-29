@@ -504,7 +504,12 @@ export class Fly {
     }
   }
 
-  update(dt, bounds, mouse, signals) {
+  update(dt, bounds, mouse, signals, petIntent = null) {
+    const guided = petIntent && signals && this.state !== 'flying'
+      && !signals.escape && !signals.sleep && signals.nervous < 0.4
+      && this.scareCooldown <= 0 && this.dartTimer <= 0 && this.backwardTimer <= 0;
+    if (guided) signals = { ...signals, legCommands: null };
+    this.model.abdomen.rotation.x = 0;
     this.time += dt;
     this.scareCooldown = Math.max(0, this.scareCooldown - dt);
     this.dartCooldown = Math.max(0, this.dartCooldown - dt);
@@ -527,8 +532,11 @@ export class Fly {
       this.saccade = 0;            // airborne heading is geometric, not a walk saccade
       this.updateFlight(dt);
     } else if (signals) {
-      if (!signals.legCommands) this.stepSaccade(dt);
-      this.brainBehavior(signals, dt, bounds, mouse);
+      if (guided) this.petBehavior(petIntent, dt);
+      else {
+        if (!signals.legCommands) this.stepSaccade(dt);
+        this.brainBehavior(signals, dt, bounds, mouse);
+      }
       if (this.state === 'walking') {
         if (signals.legCommands && signals.legCommands.length === this.model.legs.length) {
           this.prepareMotorControl(motorTempo);
@@ -586,6 +594,19 @@ export class Fly {
       : (1 + 0.03 * Math.sin(this.time * 3.0));
     this.model.abdomen.scale.set(0.9, 1.5, 0.75 * breathe);
     this.syncNode();
+  }
+
+  petBehavior(intent, dt) {
+    const dx = intent.target.x - this.pos.x, dy = intent.target.y - this.pos.y;
+    const d = Math.hypot(dx, dy);
+    this.ledge = null; this.ledgeHeading = null; this.saccade = 0; this.turnTarget = null;
+    if (d <= intent.stopRadius) { this.setState('idle'); this.speed = 0; }
+    else {
+      this.setState('walking'); this.turnToward(Math.atan2(dy, dx), dt);
+      const alignment = Math.max(0, Math.cos(angleDiff(this.heading, Math.atan2(dy, dx))));
+      this.speed = Math.min(85, Math.max(8, (d - intent.stopRadius) * 3)) * alignment;
+    }
+    this.model.abdomen.rotation.x = intent.feeding ? 0.06 * Math.sin(this.time * 14) : 0;
   }
 
   setState(s) {

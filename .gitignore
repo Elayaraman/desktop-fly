@@ -2,4 +2,5 @@ DesktopFly
 .DS_Store
 *.log
 nohup.out
+dist/
 /*.png
