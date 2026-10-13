@@ -454,8 +454,8 @@ final class BrainWindowController {
     }
 
     var isVisible: Bool { panel.isVisible }
-    func show() { panel.orderFront(nil) }
-    func hide() { panel.orderOut(nil) }
+    func show() { view.isPlaying = true; panel.orderFront(nil) }
+    func hide() { view.isPlaying = false; panel.orderOut(nil) }
 
     var isFullscreen: Bool { windowedFrame != nil }
 

@@ -8,6 +8,7 @@ import * as THREE from '../node_modules/three/build/three.module.js';
 import { LIFSim, SpikeBus, SimulationClock } from '../src/sim.js';
 import { SignalBuilder } from '../src/signals.js';
 import { Fly, SHADOWS_ENABLED } from '../src/flymodel.js';
+import { PetBehavior } from '../src/pet.js';
 import { clampf, rnd, lag } from '../src/util.js';
 
 const api = window.flyAPI;
@@ -82,6 +83,24 @@ let sim = null;
 let spikeBus = null;
 const signalBuilder = new SignalBuilder();
 const simulationClock = new SimulationClock();
+const pet = new PetBehavior();
+const sugarNodes = new Map();
+function syncSugar() {
+  for (const [id, node] of sugarNodes) {
+    if (pet.sugar.some(d => d.id === id)) continue;
+    scene.remove(node); node.geometry.dispose(); node.material.dispose(); sugarNodes.delete(id);
+  }
+  for (const drop of pet.sugar) {
+    let node = sugarNodes.get(drop.id);
+    if (!node) {
+      node = new THREE.Mesh(new THREE.BoxGeometry(12, 12, 5),
+        new THREE.MeshStandardMaterial({ color: 0xffdb7d, emissive: 0x202020 }));
+      node.rotation.z = Math.PI / 4; sugarNodes.set(drop.id, node); scene.add(node);
+    }
+    node.position.set(drop.position.x, drop.position.y, 3);
+    node.scale.setScalar(0.4 + 0.6 * drop.remaining);
+  }
+}
 
 let lastTime = null;
 let paused = false;
@@ -222,6 +241,9 @@ function computeLoom(fly, mouse, dt) {
   }
   const rel = { x: mouse.x - fly.pos.x, y: mouse.y - fly.pos.y };
   const dist = Math.max(20, Math.hypot(rel.x, rel.y));
+  if (loomOverride <= 0 && pet.gentleCursor(Math.hypot(mouseVel.x, mouseVel.y), dist)) {
+    return { l: 0, r: 0, puff: 0 };
+  }
   // radial approach speed (positive = cursor closing in)
   const approach = -(rel.x * mouseVel.x + rel.y * mouseVel.y) / dist;
   // loom ~ rate of angular expansion, attenuated with distance
@@ -288,8 +310,11 @@ function tick(dt) {
 
   for (let i = 0; i < flies.length; i++) {
     flies[i].terrain = terrain;
-    flies[i].update(dt, bounds, mouseScene, i === 0 ? signals : null);
+    const intent = i === 0 ? pet.step(dt, flies[i], mouseScene,
+      Math.hypot(mouseVel.x, mouseVel.y), signals) : null;
+    flies[i].update(dt, bounds, mouseScene, i === 0 ? signals : null, intent);
   }
+  syncSugar();
 
 }
 
@@ -323,6 +348,9 @@ api.onTap((p) => injectTap(p));
 
 api.onCommand((c) => {
   switch (c.name) {
+    case 'follow': pet.followCursor = c.value; break;
+    case 'sugar': if (onAnyScreen(c.point.x, c.point.y)) pet.dropSugar(c.point, bounds); break;
+    case 'clearSugar': pet.clearSugar(); syncSugar(); break;
     case 'pause': paused = c.value; lastTime = null; break;
     case 'escapeTest': loomOverride = 0.6; break;
     case 'addFly': addFly(); break;
@@ -335,6 +363,7 @@ api.onCommand((c) => {
 });
 
 api.onRetarget((size) => {
+  pet.clearSugar(); syncSugar();
   bounds = { width: size.width, height: size.height };
   if (size.screens) screens = size.screens;
   for (const fly of flies) fly.screens = screens;

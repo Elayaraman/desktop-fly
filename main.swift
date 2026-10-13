@@ -689,6 +689,10 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     private var pending: [(Coordinator) -> Void] = []
 
     let sim: LIFSim?
+    let pet = PetBehavior()
+    private let sugarRenderer = SugarRenderer()
+    private var petStatus = "Following cursor"
+    private var simulationPaused = false
     private let fpsLog = ProcessInfo.processInfo.environment["DESKTOPFLY_FPS"] != nil
     private var fpsFrames = 0
     private var fpsWindowStart: TimeInterval = 0
@@ -721,6 +725,17 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
     func enqueue(_ action: @escaping (Coordinator) -> Void) {
         lock.lock(); pending.append(action); lock.unlock()
+    }
+
+    func setFollowing(_ enabled: Bool) { enqueue { $0.pet.followCursor = enabled } }
+    func dropSugar(at p: CGPoint) { enqueue { $0.pet.dropSugar(at: p, bounds: $0.bounds) } }
+    func clearSugar() { enqueue { c in c.pet.clearSugar(); c.sugarRenderer.sync(c.pet.sugar, in: c.scene) } }
+    func statusText() -> String { lock.lock(); defer { lock.unlock() }; return petStatus }
+    func setPaused(_ paused: Bool) {
+        enqueue { c in
+            c.simulationPaused = paused; c.lastTime = nil
+            c.prevMouse = nil; c.mouseVel = .zero; c.mouseVelRaw = .zero; c.mouseSampleDt = 0
+        }
     }
 
     private func addFlyNow() {
@@ -761,6 +776,9 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     func retarget(size: CGSize) {
         enqueue { c in
             c.bounds = size
+            c.pet.clearSugar()
+            c.sugarRenderer.sync(c.pet.sugar, in: c.scene)
+            c.prevMouse = nil; c.mouseVel = .zero; c.mouseVelRaw = .zero; c.mouseSampleDt = 0
             c.terrain = []   // stale until the next window poll
             if let camNode = c.scene.rootNode.childNode(withName: "camera", recursively: false) {
                 camNode.camera?.orthographicScale = Double(size.height / 2)
@@ -835,6 +853,11 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         }
         let rel = CGPoint(x: m.x - fly.pos.x, y: m.y - fly.pos.y)
         let dist = max(20, hypot(rel.x, rel.y))
+        // Explicit pet sensory rule: slow motion is friendly. Abrupt motion,
+        // injected looms and window threats still reach the escape circuit.
+        if loomOverride <= 0 && pet.gentleCursor(speed: hypot(mouseVel.x, mouseVel.y), distance: dist) {
+            return (0, 0, 0)
+        }
         // radial approach speed (positive = cursor closing in)
         let approach = -(rel.x * mouseVel.x + rel.y * mouseVel.y) / dist
         // loom ~ rate of angular expansion, attenuated with distance
@@ -852,6 +875,10 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
     }
 
     func renderer(_ renderer: SCNSceneRenderer, updateAtTime t: TimeInterval) {
+        advanceFrame(at: t)
+    }
+
+    func advanceFrame(at t: TimeInterval) {
         if fpsLog {
             if fpsWindowStart == 0 { fpsWindowStart = t }
             fpsFrames += 1
@@ -866,6 +893,7 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
         let mouse = mouseScene
         lock.unlock()
         for a in actions { a(self) }
+        guard !simulationPaused else { lastTime = nil; return }
 
         guard let last = lastTime else { lastTime = t; return }
         let dt = CGFloat(min(0.05, max(0, t - last)))
@@ -907,10 +935,17 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 
         for (i, fly) in flies.enumerated() {
             fly.terrain = terrain
-            fly.update(dt: dt, bounds: bounds, mouse: mouse, signals: i == 0 ? signals : nil)
+            let intent = i == 0 ? pet.step(dt: dt, fly: fly, mouse: mouse,
+                cursorSpeed: hypot(mouseVel.x, mouseVel.y), signals: signals) : nil
+            fly.update(dt: dt, bounds: bounds, mouse: mouse, signals: i == 0 ? signals : nil,
+                       petIntent: intent)
         }
+        sugarRenderer.sync(pet.sugar, in: scene)
         if let first = flies.first {
-            lock.lock(); lastFlyPos = first.pos; lock.unlock()
+            lock.lock()
+            lastFlyPos = first.pos
+            petStatus = "\(pet.status) · \(pet.sugar.count) sugar · \(pet.meals) eaten"
+            lock.unlock()
         }
     }
 }
@@ -918,9 +953,15 @@ final class Coordinator: NSObject, SCNSceneRendererDelegate {
 // MARK: - App
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        statusItem?.button?.performClick(nil)
+        return false
+    }
     func menuNeedsUpdate(_ menu: NSMenu) {
         // only offer the display hop when there is somewhere to hop to
         moveDisplayItem?.isHidden = NSScreen.screens.count < 2
+        petStatusItem?.title = coordinator.statusText()
+        sugarItem?.isEnabled = !paused
     }
 
     var window: NSWindow!
@@ -934,6 +975,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var typingLevel: CGFloat = 0
     var paused = false
     var brainWC: BrainWindowController?
+    var brainPoints: BrainPointsFile?
+    var energySaver = true
     var dataInfo = "no data — run etl.py"
     var screenFrame = NSRect.zero
     var moveDisplayItem: NSMenuItem?
@@ -941,6 +984,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var brainHintItem: NSMenuItem?
     var bodyItem: NSMenuItem?
     var requestedBody: BodyForm = BODY_FORM
+    var followCursor = true
+    var placingSugar = false
+    var placementReturnApp: NSRunningApplication?
+    var petStatusItem: NSMenuItem?
+    var sugarItem: NSMenuItem?
+    let placementHint = NSTextField(labelWithString: "Click to drop sugar · Esc or right-click to cancel")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard let screen = NSScreen.main else { fatalError("no screen") }
@@ -949,7 +998,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         var sim: LIFSim? = nil
         let spikeBus = SpikeBus()
-        var brainPoints: BrainPointsFile? = nil
         if let data = loadBrainData() {
             sim = LIFSim(circuit: data.circuit, spikeBus: spikeBus, locomotorCircuit: data.locomotor)
             brainPoints = data.points
@@ -959,7 +1007,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         coordinator = Coordinator(bounds: frame.size, sim: sim)
 
-        window = NSWindow(contentRect: frame, styleMask: [.borderless],
+        window = FlyOverlayWindow(contentRect: frame, styleMask: [.borderless],
                           backing: .buffered, defer: false)
         window.isOpaque = false
         window.backgroundColor = .clear
@@ -968,12 +1016,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         window.ignoresMouseEvents = true
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
 
-        scnView = SCNView(frame: NSRect(origin: .zero, size: frame.size))
+        let petView = SugarPlacementView(frame: NSRect(origin: .zero, size: frame.size))
+        petView.onSugar = { [weak self] p in
+            guard let self, self.placingSugar else { return }
+            self.coordinator.dropSugar(at: p)
+            self.finishSugarPlacement()
+        }
+        petView.onCancel = { [weak self] in self?.finishSugarPlacement() }
+        scnView = petView
         scnView.scene = coordinator.scene
         scnView.backgroundColor = .clear
         scnView.allowsCameraControl = false
-        scnView.antialiasingMode = .multisampling4X
-        scnView.preferredFramesPerSecond = 120   // ProMotion; caps at display refresh
+        scnView.antialiasingMode = .none   // Retina overlay: avoid full-screen multisample buffers
+        scnView.preferredFramesPerSecond = 30   // background pet; neural/body clock stays at 120 Hz
         if ProcessInfo.processInfo.environment["DESKTOPFLY_FPS"] != nil {
             fputs("display max fps: \(NSScreen.main?.maximumFramesPerSecond ?? 0)\n", stderr)
         }
@@ -982,20 +1037,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         window.contentView = scnView
         window.orderFrontRegardless()
 
-        if let sim = sim, let pts = brainPoints {
-            let wc = BrainWindowController(points: pts, sim: sim, screen: screen)
-            wc.onFullscreenChange = { [weak self] in self?.syncFullscreenItem() }
-            wc.show()
-            brainWC = wc
-        }
+        placementHint.frame = NSRect(x: (frame.width - 450) / 2, y: frame.height - 100, width: 450, height: 34)
+        placementHint.alignment = .center
+        placementHint.font = .systemFont(ofSize: 14, weight: .medium)
+        placementHint.textColor = .white
+        placementHint.wantsLayer = true
+        placementHint.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.8).cgColor
+        placementHint.layer?.cornerRadius = 8
+        placementHint.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin]
+        placementHint.isHidden = true
+        scnView.addSubview(placementHint)
 
         setupStatusItem()
+        // Diagnostic entry to exercise the same placement flow as the menu.
+        if CommandLine.arguments.contains("--place-sugar") {
+            DispatchQueue.main.async { [weak self] in self?.beginSugarPlacement() }
+        }
 
         mouseTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
+            guard let self, !self.paused else { return }
             let loc = NSEvent.mouseLocation
-            self.coordinator.setMouse(CGPoint(x: loc.x - self.screenFrame.midX,
-                                              y: loc.y - self.screenFrame.midY))
+            self.coordinator.setMouse(self.screenFrame.contains(loc)
+                ? CGPoint(x: loc.x - self.screenFrame.midX, y: loc.y - self.screenFrame.midY) : nil)
             // typing = substrate vibration (when, never what)
             let keyIdle = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
             self.typingLevel += ((keyIdle < 0.6 ? 1.0 : 0.0) - self.typingLevel) * 0.15
@@ -1011,7 +1074,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // window terrain + new-window looms, ~1.4 Hz
         windowTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
-            guard let self else { return }
+            guard let self, !self.paused else { return }
             let snap = self.windowSense.poll(screen: self.screenFrame)
             self.coordinator.setTerrain(snap.ledges)
             let flyPos = self.coordinator.flyPosition()
@@ -1026,7 +1089,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // global mouse clicks = taps on the fly's substrate (mouse monitors are permission-free)
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            guard let self else { return }
+            guard let self, !self.paused, !self.placingSugar else { return }
             let loc = NSEvent.mouseLocation
             self.coordinator.injectTap(at: CGPoint(x: loc.x - self.screenFrame.midX,
                                                    y: loc.y - self.screenFrame.midY))
@@ -1045,6 +1108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func move(to screen: NSScreen) {
+        finishSugarPlacement()
         screenFrame = screen.frame
         window.setFrame(screen.frame, display: true)
         scnView.frame = NSRect(origin: .zero, size: screen.frame.size)
@@ -1062,6 +1126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func setupStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "🪰"
+        statusItem.button?.setAccessibilityLabel("DesktopFly controls")
         let menu = NSMenu()
         menu.addItem(withTitle: "Desktop Fly", action: nil, keyEquivalent: "")
         menu.addItem(withTitle: dataInfo, action: nil, keyEquivalent: "")
@@ -1072,6 +1137,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return it
         }
         menu.addItem(item("Pause", #selector(togglePause(_:)), "p"))
+        let follow = item("Follow Cursor", #selector(toggleFollowing(_:)), "")
+        follow.state = .on
+        menu.addItem(follow)
+        let sugar = item("Drop Sugar…", #selector(beginSugarPlacement), "")
+        menu.addItem(sugar)
+        sugarItem = sugar
+        menu.addItem(item("Clear Sugar", #selector(clearSugar), ""))
+        let petStatus = NSMenuItem(title: coordinator.statusText(), action: nil, keyEquivalent: "")
+        menu.addItem(petStatus)
+        petStatusItem = petStatus
+        menu.addItem(.separator())
+        let energy = item("Energy Saver (30 fps)", #selector(toggleEnergySaver(_:)), "")
+        energy.state = .on
+        menu.addItem(energy)
         menu.addItem(item("Show/Hide Brain", #selector(toggleBrain), "b"))
         let full = item("Fullscreen Brain", #selector(toggleBrainFullscreen), "f")
         menu.addItem(full)
@@ -1098,16 +1177,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func togglePause(_ sender: NSMenuItem) {
         paused.toggle()
+        if paused { finishSugarPlacement() }
+        coordinator.setPaused(paused)
         scnView.isPlaying = !paused
-        coordinator.lastTime = nil
         sender.title = paused ? "Resume" : "Pause"
     }
+    @objc func toggleFollowing(_ sender: NSMenuItem) {
+        followCursor.toggle()
+        sender.state = followCursor ? .on : .off
+        coordinator.setFollowing(followCursor)
+    }
+    @objc func beginSugarPlacement() {
+        guard !paused else { return }
+        placementReturnApp = NSWorkspace.shared.frontmostApplication
+        placingSugar = true
+        placementHint.isHidden = false
+        window.ignoresMouseEvents = false
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(scnView)
+    }
+    func finishSugarPlacement() {
+        guard placingSugar else { return }
+        placingSugar = false
+        placementHint.isHidden = true
+        window.ignoresMouseEvents = true
+        window.resignKey()
+        if let previous = placementReturnApp, previous.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+            previous.activate(options: [])
+        }
+        placementReturnApp = nil
+    }
+    @objc func clearSugar() { coordinator.clearSugar() }
     @objc func toggleBrain() {
-        guard let wc = brainWC else { return }
+        guard let wc = makeBrainWindow() else { return }
         wc.isVisible ? wc.hide() : wc.show()
     }
+    private func makeBrainWindow() -> BrainWindowController? {
+        if let wc = brainWC { return wc }
+        guard let sim = coordinator.sim, let pts = brainPoints,
+              let screen = NSScreen.screens.first(where: { $0.frame == screenFrame }) ?? NSScreen.main
+        else { return nil }
+        let wc = BrainWindowController(points: pts, sim: sim, screen: screen)
+        wc.onFullscreenChange = { [weak self] in self?.syncFullscreenItem() }
+        brainWC = wc
+        return wc
+    }
+    @objc func toggleEnergySaver(_ sender: NSMenuItem) {
+        energySaver.toggle()
+        scnView.preferredFramesPerSecond = energySaver ? 30 : 60
+        sender.state = energySaver ? .on : .off
+    }
     @objc func toggleBrainFullscreen() {
-        guard let wc = brainWC else { return }
+        guard let wc = makeBrainWindow() else { return }
+        wc.show()
         wc.toggleFullscreen()
         syncFullscreenItem()
     }
@@ -1140,6 +1263,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 // MARK: - Entry point
 
 let args = CommandLine.arguments
+if args.contains("--pettest") { exit(runPetTests() ? 0 : 1) }
 if let i = args.firstIndex(of: "--snapshot") {
     if args.contains("--beetle") { BODY_FORM = .beetle }
     runSnapshot(path: args.count > i + 1 ? args[i + 1] : "preview.png",

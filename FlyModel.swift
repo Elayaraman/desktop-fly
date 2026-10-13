@@ -557,7 +557,16 @@ final class Fly {
         }
     }
 
-    func update(dt: CGFloat, bounds: CGSize, mouse: CGPoint?, signals: BrainSignals?) {
+    func update(dt: CGFloat, bounds: CGSize, mouse: CGPoint?, signals originalSignals: BrainSignals?,
+                petIntent: PetIntent? = nil) {
+        var signals = originalSignals
+        let guided = petIntent != nil && signals != nil && state != .flying
+            && !(signals!.escape || signals!.sleep) && signals!.nervous < 0.4
+            && scareCooldown <= 0 && dartTimer <= 0 && backwardTimer <= 0
+        // Pet locomotion is an explicit procedural override, never presented as
+        // motor-neuron output. Returning to natural mode adopts the current pose.
+        if guided { signals?.legCommands = nil }
+        model.abdomen.eulerAngles.x = 0
         time += dt
         scareCooldown = max(0, scareCooldown - dt)
         dartCooldown = max(0, dartCooldown - dt)
@@ -582,8 +591,12 @@ final class Fly {
             saccade = 0            // airborne heading is geometric, not a walk saccade
             updateFlight(dt: dt)
         } else if let s = signals {
-            if s.legCommands == nil { stepSaccade(dt) }
-            brainBehavior(s, dt: dt, bounds: bounds, mouse: mouse)
+            if guided, let intent = petIntent {
+                petBehavior(intent, dt: dt)
+            } else {
+                if s.legCommands == nil { stepSaccade(dt) }
+                brainBehavior(s, dt: dt, bounds: bounds, mouse: mouse)
+            }
             if state == .walking {
                 if let commands = s.legCommands, commands.count == model.legs.count {
                     prepareMotorControl(tempo: motorTempo)
@@ -639,6 +652,24 @@ final class Fly {
                                          : (1 + 0.03 * sin(time * 3.0))
         model.abdomen.scale = SCNVector3(0.9, 1.5, 0.75 * breathe)
         syncNode()
+    }
+
+    private func petBehavior(_ intent: PetIntent, dt: CGFloat) {
+        let dx = intent.target.x - pos.x, dy = intent.target.y - pos.y
+        let distance = hypot(dx, dy)
+        ledge = nil; ledgeHeading = nil; saccade = 0; turnTarget = nil
+        if distance <= intent.stopRadius {
+            setState(.idle)
+            speed = 0
+        } else {
+            setState(.walking)
+            turnToward(atan2(dy, dx), dt: dt)
+            let alignment = max(0, cos(angleDiff(heading, atan2(dy, dx))))
+            speed = min(85, max(8, (distance - intent.stopRadius) * 3)) * alignment
+        }
+        // A gentle abdominal pulse is only a feeding animation.
+        if intent.feeding { model.abdomen.eulerAngles.x = 0.06 * sin(time * 14) }
+        else { model.abdomen.eulerAngles.x = 0 }
     }
 
     private func setState(_ s: State) {

@@ -28,6 +28,8 @@ let brain = null;
 let tray = null;
 let desktop = null;          // union of every display, in DIP
 let paused = false;
+let followCursor = true;
+let sugarTimer = null;
 let brainVisible = true;
 let mouseTimer = null;
 let windowTimer = null;
@@ -165,6 +167,18 @@ function buildTrayMenu() {
     { label: 'Desktop Fly', enabled: false },
     { label: dataInfo, enabled: false },
     { type: 'separator' },
+    { label: 'Follow Cursor', type: 'checkbox', checked: followCursor,
+      click: () => { followCursor = !followCursor; send(overlay, 'cmd', { name: 'follow', value: followCursor }); refreshTray(); } },
+    { label: 'Drop Sugar at Cursor (3 seconds)', enabled: !paused,
+      click: () => {
+        clearTimeout(sugarTimer);
+        sugarTimer = setTimeout(() => {
+          if (paused) return;
+          const p = screen.getCursorScreenPoint();
+          send(overlay, 'cmd', { name: 'sugar', point: toScene(p.x, p.y) });
+        }, 3000);
+      } },
+    { label: 'Clear Sugar', click: () => { clearTimeout(sugarTimer); send(overlay, 'cmd', { name: 'clearSugar' }); } },
     {
       label: paused ? 'Resume' : 'Pause',
       click: () => { paused = !paused; send(overlay, 'cmd', { name: 'pause', value: paused }); refreshTray(); },

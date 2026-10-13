@@ -116,3 +116,17 @@ Data comes from `../data/`: `brain_points.json`, `circuit.json`, and
 limitations for the new circuit are recorded in its metadata,
 [`LOCOMOTOR_PROVENANCE.md`](../data/LOCOMOTOR_PROVENANCE.md), and the root README. Old bundles without the locomotor file retain legacy walking;
 a malformed locomotor file is an explicit load error.
+
+## Local pet behavior extension
+
+**Follow Cursor** is enabled by default: move gently to attract the first fly;
+fast nearby motion still reaches the escape circuit. **Drop Sugar at Cursor
+(3 seconds)** gives you time to position the cursor after selecting the tray
+command. **Clear Sugar** cancels any pending drop and removes existing portions.
+The fly prioritizes the closest sugar, feeds for four seconds, and stops eating
+when startled or asleep. Five drops maximum, with three active minutes of lifetime.
+
+These are explicit app rules, with procedural movement during pursuit/feeding;
+they are not learned behavior or a simulated MN9 feeding circuit. Disable
+following and clear food to restore natural mode. Neural simulations continue
+in either mode. `npm test` includes the new `test/pettest.js` suite.

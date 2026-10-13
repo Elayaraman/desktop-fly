@@ -104,6 +104,7 @@ func findDataDir() -> URL? {
     let exeDir = URL(fileURLWithPath: CommandLine.arguments[0])
         .resolvingSymlinksInPath().deletingLastPathComponent()
     let candidates = [
+        (Bundle.main.resourceURL ?? exeDir).appendingPathComponent("data"),
         exeDir.appendingPathComponent("data"),
         URL(fileURLWithPath: fm.currentDirectoryPath).appendingPathComponent("data"),
     ]
